@@ -1109,32 +1109,59 @@
     updateVideoControls();
   }
 
+  function h264DimensionCandidates(width, height) {
+    const exact = {
+      width: Math.max(2, Math.round(width)),
+      height: Math.max(2, Math.round(height)),
+    };
+    const even = {
+      width: Math.max(2, exact.width - (exact.width % 2)),
+      height: Math.max(2, exact.height - (exact.height % 2)),
+    };
+    if (exact.width === even.width && exact.height === even.height) {
+      return [exact];
+    }
+    return [exact, even];
+  }
+
+  function calculateVideoBitrate(width, height, fps) {
+    const pixelsPerSecond = width * height * fps;
+    const bitsPerPixel = 0.15;
+    return Math.round(Math.max(2_000_000, Math.min(80_000_000, pixelsPerSecond * bitsPerPixel)));
+  }
+
   async function findH264EncoderConfig(width, height, fps) {
     if (typeof window.VideoEncoder === "undefined") return null;
-    const bitrate = Math.round(Math.max(2_000_000, Math.min(14_000_000, width * height * fps * 0.08)));
     const codecs = [
+      "avc1.640034",
+      "avc1.640033",
+      "avc1.640032",
+      "avc1.64002A",
       "avc1.640028",
       "avc1.4d0028",
       "avc1.42001f",
       "avc1.420028",
       "avc1.420034",
     ];
-    for (const codec of codecs) {
-      const config = {
-        codec,
-        width,
-        height,
-        bitrate,
-        framerate: fps,
-        hardwareAcceleration: "prefer-hardware",
-        latencyMode: "quality",
-        avc: { format: "avc" },
-      };
-      try {
-        const support = await window.VideoEncoder.isConfigSupported(config);
-        if (support.supported) return config;
-      } catch (error) {
-        console.debug(`H.264 config unavailable: ${codec}`, error);
+    for (const dimensions of h264DimensionCandidates(width, height)) {
+      const bitrate = calculateVideoBitrate(dimensions.width, dimensions.height, fps);
+      for (const codec of codecs) {
+        const config = {
+          codec,
+          width: dimensions.width,
+          height: dimensions.height,
+          bitrate,
+          framerate: fps,
+          hardwareAcceleration: "prefer-hardware",
+          latencyMode: "quality",
+          avc: { format: "avc" },
+        };
+        try {
+          const support = await window.VideoEncoder.isConfigSupported(config);
+          if (support.supported) return config;
+        } catch (error) {
+          console.debug(`H.264 config unavailable: ${codec}`, error);
+        }
       }
     }
     return null;
@@ -1171,15 +1198,17 @@
     const fps = Number(elements.videoFpsSelect.value) || state.video.fps || 30;
     const sourceWidth = video.videoWidth;
     const sourceHeight = video.videoHeight;
-    const exportWidth = Math.max(2, sourceWidth - (sourceWidth % 2));
-    const exportHeight = Math.max(2, sourceHeight - (sourceHeight % 2));
+    const maxEdge = Number(elements.maxEdgeSelect.value) || 0;
+    const inferenceSize = targetDimensions(sourceWidth, sourceHeight, maxEdge);
     const totalFrames = Math.max(1, Math.ceil(duration * fps - 1e-6));
     const originalTime = video.currentTime;
-    const config = await findH264EncoderConfig(exportWidth, exportHeight, fps);
+    const config = await findH264EncoderConfig(inferenceSize.width, inferenceSize.height, fps);
     if (!config) {
       showError("当前浏览器没有可用的 H.264 视频编码器，无法导出 MP4。");
       return;
     }
+    const exportWidth = config.width;
+    const exportHeight = config.height;
 
     state.video.playing = false;
     state.video.playbackToken += 1;
@@ -1267,7 +1296,7 @@
       const blob = new Blob([target.buffer], { type: "video/mp4" });
       const contentName = state.inputs.content?.file?.name?.replace(/\.[^.]+$/, "") || "content";
       triggerDownload(blob, `${contentName}_colorfm_output.mp4`);
-      setStatus("ready", `完整视频已导出：${totalFrames} 帧，${fps} fps。`);
+      setStatus("ready", `完整视频已导出：${totalFrames} 帧，${fps} fps，${exportWidth} × ${exportHeight}。`);
     } catch (error) {
       if (!state.videoExport.abort) {
         const message = error?.message || String(error);
